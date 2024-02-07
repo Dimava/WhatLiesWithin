@@ -1537,3 +1537,150 @@ script.on_event(defines.events.on_lua_shortcut, LuaShortcut)
 script.on_event(defines.events.on_gui_selection_state_changed, GuiSelectionStateChanged)
 script.on_event(defines.events.on_gui_closed, OnGuiClosed)
 script.on_event("wlw-toggle-travel-interface", keyboard_toggle_travel_interface)
+
+
+
+function Tele(event, dir)
+    -- get the player who clicked
+    local player = game.get_player(event.player_index)
+
+    if not (player and player.valid) then
+        return
+    end
+
+    -- 
+    -- create a table of localized strings of every top level surface, we'll add the sub surfaces once a top surface has been chosen.
+    local top_level_surfaces = {}
+    local nauvis_sub_surfaces = {}
+    table.insert(nauvis_sub_surfaces, {"wlw-gui.surface-name", "nauvis"})
+    for name,zone in pairs(global.zones_by_name) do
+        if string.find(name, "nauvis underground %- layer") then
+            table.insert(nauvis_sub_surfaces, {"wlw-gui.surface-name", name})
+        elseif string.find(name, "underground %- layer") then
+            -- do nothing, this is an underground layer that isn't for nauvis so it shouldn't be in either dropdown yet.
+            -- when the top level dropdown selection is changed this layer will be added to the sub level dropdown.
+            -- we need this check here to filter these layers out otherwise they'd be added to top level which they certainly are not.
+        elseif string.find(name, "aai%-signals") then
+            -- also do nothing, the player shouldn't see the aai signals surface.
+        else
+            table.insert(top_level_surfaces, {"wlw-gui.surface-name", name})
+        end
+    end 
+    
+        local surface = player.surface
+        local player_surface_name = surface.name 
+
+        -- get the name of the surface that we want to travel to. it's index two in the table that's selected in the dropdown menu.
+        local selected_index = 1
+        for i, v in ipairs(nauvis_sub_surfaces) do
+            if v[2] == player_surface_name then selected_index = i end
+        end
+        if dir == 'up' then selected_index = selected_index - 1 end
+        if dir == 'down' then selected_index = selected_index + 1 end
+
+        if not nauvis_sub_surfaces[selected_index] then 
+            game.print('cannot teleport there, this surface is the last one!')
+            return
+        end        
+
+        local target_surface_name = nauvis_sub_surfaces[selected_index][2]
+
+        -- make sure this is somewhere we should be able to travel to (only surfaces attached to current world)
+        local current_top_level = nil
+
+        -- we need to search for this string to see if we're already on an underground layer.
+        local underground_string_index = string.find(player_surface_name, "underground %- layer")
+
+        if underground_string_index == nil then
+            -- the player is not on an underground layer, so we're going to assume they're on the top level.
+            current_top_level = player_surface_name
+        else
+            -- the player is on an underground layer, so the top level name should be our current name minus everything starting from the space before underground - layer
+            -- to the end of the string.
+            current_top_level = string.sub(player_surface_name, 1, underground_string_index - 2)
+        end
+
+        -- if the player's current top level is in the target surface name, then we'll allow them to travel there.
+        -- e.g. target surface = nauvis underground - layer 101 current top level = nauvis (they can travel)
+        -- e.g. target surface = Frost underground - layer 30 current top level = nauvis (they can not travel)
+        if string.find(target_surface_name, current_top_level) then
+            -- first check if the player is on the surface that they're trying to travel to.
+            if target_surface_name ~= player_surface_name then
+                -- the target surface is a sub surface of the player's current world and should be traveled to.
+                local target_surface = game.get_surface(target_surface_name)
+
+                -- make sure there's an item elevator pair connecting these surfaces within 10 tiles of the player.
+
+                -- first see if there are item elevators within 10 tiles
+                local surface_item_elevators_in_range = surface.find_entities_filtered{
+                    position = player.position,
+                    radius = 10,
+                    name = "wlw-item-elevator",
+                    force = player.force
+                }
+
+                -- then iterate over all of them and if their companion elevator is on the target surface.
+                -- if it is we can travel.
+                if next(surface_item_elevators_in_range) ~= nil then
+
+                    local pair_exists = false
+
+                    for _, elevator in ipairs(surface_item_elevators_in_range) do
+                        local companions = get_companion_elevators(elevator)
+                        if next(companions) ~= nil then
+                            for i=1, #companions do
+                                if companions[i].surface == target_surface then
+                                    pair_exists = true
+                                    goto pair_check
+                                end
+                            end
+                        end
+                    end
+                    ::pair_check::
+                    if pair_exists then
+                        -- we need to find a non colliding position for the player to teleport to
+                        local non_colliding_position = target_surface.find_non_colliding_position("character", player.position, 1000, 1)
+
+                        if non_colliding_position == nil then
+                            -- there was not a non-colliding position within 1000 distance of the player's position.
+                            -- prompt the player to move and try again.
+                            player.print("[color=1,0,0]No valid position found. Move somewhere else and try again.[/color]")
+                        else
+                            -- we found a valid position so tell the player we're moving them there and move them.
+                            player.print("You make your way to " .. target_surface_name .. ".")
+                            player.teleport(non_colliding_position, target_surface)
+                            --x local super_parent_frame = parent_frame.parent
+                            --x super_parent_frame.wlw_travel_labels_flow.wlw_travel_current_location_label.caption = "Current Location: [color=0,1,0]" .. player_surface_name .. "[/color]"
+                            --x toggle_travel_interface(player)
+                        end
+                    else
+                        -- There was no such pair, so we tell the player to find one and return.
+                        player.print("You're not close enough to an item elevator that goes there. Please find or place one and try again!")
+                        return
+                    end
+                else
+                    -- There was no such pair, so we tell the player to find one and return.
+                    player.print("You're not close enough to an item elevator that goes there. Please find or place one and try again!")
+                    return
+                end
+            else
+                -- the player is already on the target surface, so travelling should be disabled.
+                -- if we don't disable travelling, then the player can potentially abuse this to teleport across the surface they're already on.
+                player.print("Traveling failed, you are already there.")
+            end
+        else
+            -- tell the player that they can not travel between worlds, only sub surfaces of a single world.
+            player.print("You'll need to find another way to travel to a different world.")
+        end
+
+end
+
+
+script.on_event("wlw-travel-up", function (event)
+    Tele(event, 'up')
+end)
+script.on_event("wlw-travel-down", function (event)
+    Tele(event, 'down')
+end)
+
+
